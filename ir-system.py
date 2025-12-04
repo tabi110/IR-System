@@ -27,7 +27,7 @@ except ImportError:
 
 # Hardcoded Stop Word List (Standard English)
 # This list is passed directly to TfidfVectorizer's stop_words parameter
-STOP_WORDS = {
+STOP_WORDS = [
     'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've", 
     "you'll", "you'd", 'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 
     'she', "she's", 'her', 'hers', 'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 
@@ -45,7 +45,7 @@ STOP_WORDS = {
     "isn't", 'ma', 'mightn', "mightn't", 'mustn', "mustn't", 'needn', "needn't", 'shan', "shan't", 
     'shouldn', "shouldn't", 'wasn', "wasn't", 'weren', "weren't", 'won', "won't", 'wouldn', 
     "wouldn't"
-}
+]
 
 def custom_tokenizer(text):
     """
@@ -80,85 +80,88 @@ class IRSystem:
         
         # BM25 components
         self.bm25 = None
-        self.tokenized_corpus = [] # List of tokenized document lists
 
     def load_and_index_data(self, filepath):
-        """
-        Reads data from CSV, preprocesses documents, and builds both the 
-        TF-IDF matrix (for VSM) and the tokenized corpus (for BM25).
-        """
-        start_time = time.time()
-        print(f"Loading and indexing data from {filepath}...")
+        """Loads articles from CSV file and builds both VSM and BM25 indices."""
+        if not os.path.exists(filepath):
+            print(f"\n[!] Error: File '{filepath}' not found.")
+            return
         
-        self.raw_documents.clear()
-        self.documents.clear()
-        self.tokenized_corpus.clear()
-        doc_count = 0
-
         try:
-            if not os.path.exists(filepath):
-                 raise FileNotFoundError(f"File not found: {filepath}. Please ensure it is in the same directory.")
-
-            with open(filepath, mode='r', encoding='utf-8') as file:
-                reader = csv.DictReader(file)
-                
-                for i, row in enumerate(reader):
-                    doc_id = i + 1  # 1-based indexing for documents
-                    
-                    # Store original content
-                    self.documents[doc_id] = {
-                        'Heading': row.get('Heading', 'N/A'),
-                        'Article': row.get('Article', 'N/A')
-                    }
-
-                    # 1. Combine and clean the raw text (removes HTML)
-                    raw_text = row.get('Heading', '') + " " + row.get('Article', '')
-                    cleaned_text = clean_text(raw_text)
-                    self.raw_documents.append(cleaned_text)
-                    
-                    doc_count += 1
+            self.documents = {}
+            self.raw_documents = []
             
-            self.N = doc_count
-            if self.N == 0:
-                raise ValueError("No documents found in the file.")
+            # Try multiple encodings
+            encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
+            content = None
+            
+            for encoding in encodings:
+                try:
+                    with open(filepath, 'r', encoding=encoding) as f:
+                        content = f.read()
+                    print(f"[*] Successfully read file with {encoding} encoding")
+                    break
+                except (UnicodeDecodeError, UnicodeError):
+                    continue
+            
+            if content is None:
+                print(f"\n[!] Error: Could not read file with any supported encoding.")
+                return
+            
+            # Parse CSV from the content
+            import io
+            reader = csv.DictReader(io.StringIO(content))
+            doc_id = 1
+            
+            for row in reader:
+                heading = row.get('Heading', '')
+                article = row.get('Article', '')
                 
-            # --- VSM Indexing (TF-IDF) ---
-            # TfidfVectorizer handles tokenization, stop word removal, and IDF calculation
+                # Clean the text
+                heading = clean_text(heading)
+                article = clean_text(article)
+                
+                self.documents[doc_id] = {
+                    'Heading': heading,
+                    'Article': article
+                }
+                
+                # Concatenate heading and article for indexing
+                combined = f"{heading} {article}"
+                self.raw_documents.append(combined)
+                doc_id += 1
+            
+            self.N = len(self.documents)
+            
+            if self.N == 0:
+                print("\n[!] No documents loaded from CSV file.")
+                return
+            
+            # Build TF-IDF index
             self.tfidf_vectorizer = TfidfVectorizer(
-                stop_words=STOP_WORDS, # Explicitly removes stop words
-                tokenizer=custom_tokenizer, 
-                token_pattern=None # Disable default regex to use custom tokenizer
+                tokenizer=custom_tokenizer,
+                stop_words=STOP_WORDS,
+                lowercase=True,
+                min_df=1,
+                max_df=0.95
             )
             self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(self.raw_documents)
             
-            # --- BM25 Indexing ---
-            if BM25Okapi:
-                # BM25 requires a list of tokenized documents
-                for doc in self.raw_documents:
-                    # We need to manually apply stop word filtering for the BM25 library's input format
-                    tokens = custom_tokenizer(doc)
-                    self.tokenized_corpus.append([
-                        token for token in tokens if token not in STOP_WORDS
-                    ])
-
-                self.bm25 = BM25Okapi(self.tokenized_corpus)
-
-            end_time = time.time()
-            print(f"\n--- Indexing Complete ---")
-            print(f"Total documents indexed (N): {self.N}")
-            # Check if VSM index was successfully created before accessing vocabulary
-            if self.tfidf_vectorizer:
-                print(f"Unique terms in VSM index: {len(self.tfidf_vectorizer.vocabulary_)}")
-            print(f"Time taken: {end_time - start_time:.2f} seconds")
+            # Build BM25 index
+            if BM25Okapi is not None:
+                tokenized_docs = [custom_tokenizer(doc) for doc in self.raw_documents]
+                self.bm25 = BM25Okapi(tokenized_docs)
             
-        except FileNotFoundError as e:
-            print(f"Error: {e}", file=sys.stderr)
+            print(f"\n[✓] Data indexed successfully!")
+            print(f"    Total documents: {self.N}")
+            print(f"    VSM (TF-IDF) index: Built")
+            print(f"    BM25 index: {'Built' if self.bm25 else 'Disabled (rank-bm25 not installed)'}")
+        
         except Exception as e:
-            print(f"An unexpected error occurred during indexing: {e}", file=sys.stderr)
+            print(f"\n[!] Error loading data: {e}")
 
-    def _rank_results(self, scores, top_k):
-        """Helper to rank scores and prepare results for display."""
-        # Convert 0-based index to 1-based doc_id for retrieval
+    def _rank_results(self, scores, top_k=10):
+        """Helper method to rank and format results."""
         doc_ids = np.arange(1, self.N + 1)
         
         # Pair scores with doc_ids
@@ -224,8 +227,9 @@ class IRSystem:
         query_start_time = time.time()
 
         # 1. Preprocess the query manually (Tokenize and remove stop words)
+        stop_words_set = set(STOP_WORDS)
         query_tokens = [
-            token for token in custom_tokenizer(raw_query) if token not in STOP_WORDS
+            token for token in custom_tokenizer(raw_query) if token not in stop_words_set
         ]
         
         if not query_tokens:
@@ -263,7 +267,7 @@ def main():
     ir_system = IRSystem()
     data_indexed = False
     data_filepath = "Articles.csv"
-    bm25_is_available = BM25Ok is not None
+    bm25_is_available = BM25Okapi is not None
 
     while True:
         display_menu(bm25_is_available)
@@ -363,7 +367,6 @@ def main():
                     print(f"SNIPPET: {res['snippet']}")
                     print("-" * 70)
 
-
         elif choice == '4':
             # Option 4: Quit
             print("\nExiting Hybrid IR System. Goodbye!")
@@ -380,5 +383,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nProgram interrupted. Exiting.")
         sys.exit(0)
-        
-        
